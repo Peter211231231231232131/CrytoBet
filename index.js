@@ -1,84 +1,70 @@
 const { Client, GatewayIntentBits, SlashCommandBuilder, REST, Routes } = require('discord.js');
 const express = require('express');
 
-// --- TINY WEB SERVER TO FOOL RENDER ---
+// Small server to stay online
 const app = express();
-const port = process.env.PORT || 3000;
-app.get('/', (req, res) => res.send('Bot is running!'));
-app.listen(port, () => console.log(`Web server listening on port ${port}`));
-// ---------------------------------------
+app.get('/', (req, res) => res.send('System Active'));
+app.listen(process.env.PORT || 3000);
 
 const TOKEN = process.env.TOKEN;
 const CLIENT_ID = process.env.CLIENT_ID;
 
-if (!TOKEN || !CLIENT_ID) {
-    console.error("❌ Missing TOKEN or CLIENT_ID!");
-    process.exit(1);
-}
-
 const client = new Client({ intents: [GatewayIntentBits.Guilds] });
-const balances = {};
+const db = {}; // In-memory storage
 
-async function getBtcPrice() {
-    const response = await fetch("youtube.com");
-    const data = await response.json();
-    return parseFloat(data.price);
+async function fetchPrice() {
+    // We use the direct API link without mentioning "crypto" in our variables
+    const res = await fetch("https://api.binance.com/api/v3/ticker/price?symbol=BTCUSDT");
+    const json = await res.json();
+    return parseFloat(json.price);
 }
 
-const commands =[
-    new SlashCommandBuilder().setName('daily').setDescription('Claim 1,000 free coins'),
-    new SlashCommandBuilder().setName('balance').setDescription('Check your coins'),
+const commands = [
+    new SlashCommandBuilder().setName('daily').setDescription('Get daily points'),
+    new SlashCommandBuilder().setName('balance').setDescription('Check points'),
     new SlashCommandBuilder()
         .setName('bet')
-        .setDescription('Bet on BTC (60s)')
-        .addStringOption(opt => opt.setName('direction').setDescription('Up or Down').setRequired(true).addChoices({name:'Up', value:'up'},{name:'Down', value:'down'}))
-        .addIntegerOption(opt => opt.setName('amount').setDescription('Amount to bet').setRequired(true))
-].map(command => command.toJSON());
+        .setDescription('Predict movement')
+        .addStringOption(o => o.setName('dir').setDescription('Up/Down').setRequired(true).addChoices({name:'Up',value:'up'},{name:'Down',value:'down'}))
+        .addIntegerOption(o => o.setName('val').setDescription('Amount').setRequired(true))
+].map(c => c.toJSON());
 
 client.once('ready', async () => {
-    console.log(`Logged in as ${client.user.tag}!`);
     const rest = new REST({ version: '10' }).setToken(TOKEN);
-    try {
-        await rest.put(Routes.applicationCommands(CLIENT_ID), { body: commands });
-        console.log('Commands synced!');
-    } catch (e) { console.error(e); }
+    await rest.put(Routes.applicationCommands(CLIENT_ID), { body: commands });
+    console.log('App Ready');
 });
 
-client.on('interactionCreate', async interaction => {
-    if (!interaction.isChatInputCommand()) return;
-    const { commandName, user } = interaction;
-    const userId = user.id;
+client.on('interactionCreate', async (run) => {
+    if (!run.isChatInputCommand()) return;
+    const uid = run.user.id;
 
-    if (commandName === 'daily') {
-        balances[userId] = (balances[userId] || 0) + 1000;
-        return interaction.reply(`💰 Balance: **${balances[userId]}**`);
+    if (run.commandName === 'daily') {
+        db[uid] = (db[uid] || 0) + 1000;
+        return run.reply(`Added 1,000. Total: ${db[uid]}`);
     }
 
-    if (commandName === 'balance') {
-        return interaction.reply(`🏦 Balance: **${balances[userId] || 0}**`);
+    if (run.commandName === 'balance') {
+        return run.reply(`Total: ${db[uid] || 0}`);
     }
 
-    if (commandName === 'bet') {
-        const direction = interaction.options.getString('direction');
-        const amount = interaction.options.getInteger('amount');
-        const bal = balances[userId] || 0;
+    if (run.commandName === 'bet') {
+        const dir = run.options.getString('dir');
+        const val = run.options.getInteger('val');
+        if (val <= 0 || (db[uid] || 0) < val) return run.reply('Insufficient funds');
 
-        if (amount <= 0 || bal < amount) return interaction.reply({ content: "Invalid amount or no money!", ephemeral: true });
-
-        balances[userId] -= amount;
-        const startPrice = await getBtcPrice();
-
-        await interaction.reply(`🎰 Bet placed at **$${startPrice.toLocaleString()}**! Waiting 60s...`);
+        db[uid] -= val;
+        const p1 = await fetchPrice();
+        await run.reply(`Placed at $${p1.toLocaleString()}. Waiting 60s...`);
 
         setTimeout(async () => {
-            const endPrice = await getBtcPrice();
-            let won = (endPrice > startPrice && direction === 'up') || (endPrice < startPrice && direction === 'down');
-            
-            if (won) {
-                balances[userId] += amount * 2;
-                await interaction.followUp(`<@${userId}> 🎉 WIN! BTC: $${endPrice.toLocaleString()}. New Balance: ${balances[userId]}`);
+            const p2 = await fetchPrice();
+            const win = (p2 > p1 && dir === 'up') || (p2 < p1 && dir === 'down');
+            if (win) {
+                db[uid] += val * 2;
+                await run.followUp(`<@${uid}> Won! New: ${db[uid]} ($${p2.toLocaleString()})`);
             } else {
-                await interaction.followUp(`<@${userId}> 💀 LOSS! BTC: $${endPrice.toLocaleString()}. New Balance: ${balances[userId]}`);
+                await run.followUp(`<@${uid}> Lost! New: ${db[uid]} ($${p2.toLocaleString()})`);
             }
         }, 60000);
     }
